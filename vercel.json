@@ -1,6 +1,5 @@
 {
   "buildCommand": "next build",
-  "deploymentType": "npm",
   "env": {
     "NODE_ENV": {
       "value": "production"
