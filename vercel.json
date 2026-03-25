@@ -1,9 +1,7 @@
 {
   "buildCommand": "next build",
   "env": {
-    "NODE_ENV": {
-      "value": "production"
-    }
+    "NODE_ENV": "production"
   },
   "functions": {
     "api/**/*.ts": {
