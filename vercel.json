@@ -3,11 +3,6 @@
   "env": {
     "NODE_ENV": "production"
   },
-  "functions": {
-    "api/**/*.ts": {
-      "maxDuration": 60
-    }
-  },
   "regions": ["iad1"],
   "headers": [
     {
