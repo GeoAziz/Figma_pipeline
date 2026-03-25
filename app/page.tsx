@@ -959,6 +959,7 @@ export default function FigmaToMarkdown(): JSX.Element {
                                 }}
                               >
                                 {result.thumbnails[f.id] ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
                                   <img
                                     src={result.thumbnails[f.id]}
                                     alt={f.name}
@@ -1095,7 +1096,7 @@ export default function FigmaToMarkdown(): JSX.Element {
                     .md
                   </code>{" "}
                   file and paste it into Claude, GPT-4, Cursor, or any AI
-                  with: <em>"Build the full application described in this spec."</em>{" "}
+                  with: <em>&quot;Build the full application described in this spec.&quot;</em>{" "}
                   All colours, typography, screen layouts, components and build
                   instructions are included.
                 </div>

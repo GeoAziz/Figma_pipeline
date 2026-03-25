@@ -114,10 +114,10 @@ export function generateMarkdown({
         md += buildScreenInventory(frames, thumbnails, fileKey);
         break;
       case "accessibility":
-        md += buildAccessibilityGuide(components, frames);
+        md += buildAccessibilityGuide(components);
         break;
       case "instructions":
-        md += buildBuildInstructions(frames, topColors, fonts, fileKey);
+        md += buildBuildInstructions(frames, topColors, fonts);
         break;
       case "assets":
         md += buildAssetChecklist(frames, fileKey);
@@ -410,8 +410,7 @@ ${childCount > 0 ? `- **Layer names:** ${childNames}${childCount > 8 ? ` … +${
 }
 
 function buildAccessibilityGuide(
-  components: ExtractedComponent[],
-  frames: ExtractedFrame[]
+  components: ExtractedComponent[]
 ): string {
   let md = `## ♿ Accessibility & Semantics
 
@@ -448,8 +447,7 @@ Semantic layer names found (state, size, semantic prefixes):
 function buildBuildInstructions(
   frames: ExtractedFrame[],
   colors: ExtractedColor[],
-  fonts: Map<string, ExtractedFont>,
-  fileKey: string
+  fonts: Map<string, ExtractedFont>
 ): string {
   return `## 🏗️ AI Build Instructions
 

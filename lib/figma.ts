@@ -1,10 +1,4 @@
-import {
-  FigmaNode,
-  CollectionResults,
-  FigmaPrototypeConnection,
-  LayerNamePattern,
-  FlowConnection,
-} from "./types";
+import { FigmaNode, CollectionResults } from "./types";
 
 /**
  * Fetch data from Figma REST API
@@ -93,7 +87,7 @@ export function collectAll(
 
   // Collect component definitions with variants
   if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
-    const variants = extractComponentVariants(node, results);
+    const variants = extractComponentVariants(node);
     const layoutInfo = node.layoutMode
       ? {
           mode: node.layoutMode,
@@ -209,8 +203,7 @@ function extractEffects(
  * Extract component variants from a COMPONENT_SET
  */
 function extractComponentVariants(
-  node: FigmaNode,
-  results: CollectionResults
+  node: FigmaNode
 ): Array<{ id: string; name: string; properties: Record<string, string | boolean>; description?: string }> {
   const variants = [];
 
