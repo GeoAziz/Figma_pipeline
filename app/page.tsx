@@ -70,6 +70,8 @@ export default function FigmaToMarkdown(): JSX.Element {
         interactions: [],
         effects: new Map(),
         layerPatterns: new Map(),
+        flowMapLabels: [],
+        screenGroups: new Map(),
       };
 
       fileData.document.children.forEach((pageNode) => {
@@ -78,15 +80,14 @@ export default function FigmaToMarkdown(): JSX.Element {
         );
       });
 
-      // Dedup frames
+      // Dedup frames (no slice cap — all screens are included)
       const seen = new Set<string>();
       const uniqueFrames = treeResults.frames
         .filter((f) => {
           if (seen.has(f.id)) return false;
           seen.add(f.id);
           return true;
-        })
-        .slice(0, 60);
+        });
 
       setStep(2);
 
@@ -124,6 +125,8 @@ export default function FigmaToMarkdown(): JSX.Element {
         effects: treeResults.effects,
         fileKey: key,
         template,
+        flowMapLabels: treeResults.flowMapLabels,
+        screenGroups: treeResults.screenGroups,
       });
 
       setResult({
