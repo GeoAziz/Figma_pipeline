@@ -1,4 +1,100 @@
-import { FigmaNode, CollectionResults } from "./types";
+import { FigmaNode, CollectionResults, ParsedScreenName } from "./types";
+
+// ---------------------------------------------------------------------------
+// Screen-discovery constants & helpers
+// ---------------------------------------------------------------------------
+
+/** Matches canvas-level screen names like "54_Light_create food - filled form" */
+export const SCREEN_NAME_REGEX = /^\d+_(Light|Dark)_.+/;
+
+/**
+ * Substring blocklist for metadata / documentation frame names.
+ * Applied case-insensitively. Does NOT include "container" because
+ * Container flow-map frames are handled separately.
+ */
+export const METADATA_NAME_BLOCKLIST: readonly string[] = [
+  "thumbnails",
+  "quick start guide",
+  "navigation marker",
+  "notes",
+  "navigation",
+  "more products",
+  "munirsr",
+];
+
+/**
+ * Returns true when a frame name looks like a Figma component-property label
+ * (e.g. "Dark=False, Component=Blur Background").
+ * Such names are never valid screen names.
+ */
+export function isComponentInstanceLabel(name: string): boolean {
+  return /(^|,\s*)\w[\w\s]*\s*=\s*[^,]+/.test(name);
+}
+
+/**
+ * Returns true when a depth-1 canvas frame is documentation / metadata that
+ * should not appear in the screen inventory or build order.
+ */
+export function isMetadataFrame(node: FigmaNode): boolean {
+  const lower = node.name.toLowerCase();
+  if (METADATA_NAME_BLOCKLIST.some((b) => lower.includes(b))) return true;
+  const bb = node.absoluteBoundingBox;
+  if (bb) {
+    if (bb.width > 800 || bb.height > 1500) return true;
+    if (bb.height === 152) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true when a depth-1 node is one of the large Container flow-map
+ * frames (name is exactly "Container" and dimensions are very large).
+ */
+export function isContainerFlowMap(node: FigmaNode): boolean {
+  if (!/^container$/i.test(node.name.trim())) return false;
+  const bb = node.absoluteBoundingBox;
+  return !!(bb && (bb.width > 800 || bb.height > 1500));
+}
+
+/**
+ * Returns true when a FRAME is a rasterized stub:
+ * exactly one child RECTANGLE with the same name as the parent frame,
+ * carrying an IMAGE fill.
+ */
+export function isRasterizedStub(node: FigmaNode): boolean {
+  if (!node.children || node.children.length !== 1) return false;
+  const child = node.children[0];
+  if (child.type !== "RECTANGLE") return false;
+  if (child.name !== node.name) return false;
+  return (child.fills ?? []).some((f) => f.type === "IMAGE");
+}
+
+/**
+ * Parses a screen name into its constituent parts.
+ * Returns null when the name does not follow the `{num}_(Light|Dark)_{feature}` convention.
+ */
+export function parseScreenName(name: string): ParsedScreenName | null {
+  const m = name.match(/^(\d+)_(Light|Dark)_(.+)$/);
+  if (!m) return null;
+  return { num: parseInt(m[1], 10), theme: m[2] as "Light" | "Dark", feature: m[3] };
+}
+
+/**
+ * Recursively collects all TEXT node character strings from a subtree.
+ * Used to extract navigation labels from Container flow-map frames.
+ */
+export function extractTextLabels(node: FigmaNode): string[] {
+  const labels: string[] = [];
+  function walk(n: FigmaNode): void {
+    if (n.type === "TEXT") {
+      const chars = (n as unknown as { characters?: string }).characters;
+      if (chars?.trim()) labels.push(chars.trim());
+    }
+    n.children?.forEach(walk);
+  }
+  walk(node);
+  return labels;
+}
 
 /**
  * Fetch data from Figma REST API
@@ -23,7 +119,13 @@ export async function figmaFetch(
 }
 
 /**
- * Recursively collect frames, components, colors, fonts, layout, effects, and interactions
+ * Recursively collect frames, components, colors, fonts, layout, effects, and interactions.
+ *
+ * Screen-discovery rules (applied at depth 1 — direct canvas children):
+ *  - Only FRAME nodes whose name matches `SCREEN_NAME_REGEX` are added to `results.frames`.
+ *  - Container flow-map frames have their TEXT descendants extracted to `results.flowMapLabels`.
+ *  - Metadata / documentation frames are skipped entirely.
+ *  - Rasterized stub screens are flagged; their children are not traversed for tokens.
  */
 export function collectAll(
   node: FigmaNode | undefined,
@@ -36,20 +138,42 @@ export function collectAll(
     interactions: [],
     effects: new Map(),
     layerPatterns: new Map(),
+    flowMapLabels: [],
+    screenGroups: new Map(),
   }
 ): CollectionResults {
   if (!node) return results;
 
-  // Identify top-level screens (frames at depth 1-2)
-  const isTopFrame =
-    (node.type === "FRAME" ||
-      node.type === "COMPONENT" ||
-      node.type === "COMPONENT_SET") &&
-    depth >= 1 &&
-    depth <= 2;
+  // ── Depth-1 gate: apply canvas-level filtering ──────────────────────────
+  if (depth === 1) {
+    // Container flow-map frames: extract text labels and stop.
+    if (isContainerFlowMap(node)) {
+      results.flowMapLabels.push(...extractTextLabels(node));
+      return results;
+    }
 
-  if (isTopFrame) {
-    // Extract layout information
+    // Non-screen FRAME nodes (metadata, docs, etc.): skip entirely.
+    if (
+      node.type === "FRAME" &&
+      (!SCREEN_NAME_REGEX.test(node.name) || isComponentInstanceLabel(node.name))
+    ) {
+      if (isMetadataFrame(node) || !SCREEN_NAME_REGEX.test(node.name)) {
+        return results;
+      }
+    }
+  }
+
+  // ── Screen identification (depth-1 FRAMEs matching naming convention) ───
+  const isScreen =
+    node.type === "FRAME" &&
+    depth === 1 &&
+    SCREEN_NAME_REGEX.test(node.name) &&
+    !isComponentInstanceLabel(node.name);
+
+  if (isScreen) {
+    const rasterized = isRasterizedStub(node);
+    const parsed = parseScreenName(node.name);
+
     const layout = node.layoutMode
       ? {
           mode: node.layoutMode,
@@ -58,10 +182,8 @@ export function collectAll(
         }
       : undefined;
 
-    // Extract effects
     const effects = extractEffects(node);
 
-    // Extract interactions/prototype connections
     const interactions = node.prototypeConnections || [];
     interactions.forEach((conn) => {
       if (conn.destinationID) {
@@ -74,7 +196,7 @@ export function collectAll(
       }
     });
 
-    results.frames.push({
+    const frame = {
       id: node.id,
       name: node.name,
       type: node.type,
@@ -82,7 +204,32 @@ export function collectAll(
       layout,
       effects,
       interactions,
-    });
+      isRasterized: rasterized,
+      screenGroup: parsed ?? undefined,
+    };
+
+    results.frames.push(frame);
+
+    // Maintain grouped screen-inventory map
+    if (parsed) {
+      const groupKey = `${parsed.num}_${parsed.feature}`;
+      if (!results.screenGroups.has(groupKey)) {
+        results.screenGroups.set(groupKey, {
+          key: groupKey,
+          num: parsed.num,
+          feature: parsed.feature,
+        });
+      }
+      const group = results.screenGroups.get(groupKey)!;
+      if (parsed.theme === "Light") {
+        group.light = frame;
+      } else {
+        group.dark = frame;
+      }
+    }
+
+    // Rasterized stubs have no traversable component tree; skip children.
+    if (rasterized) return results;
   }
 
   // Collect component definitions with variants

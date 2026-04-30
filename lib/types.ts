@@ -147,6 +147,13 @@ export interface ExtractedFont {
   sizes: Set<number>;
 }
 
+/** Parsed parts of a screen name following the `{num}_(Light|Dark)_{feature}` convention */
+export interface ParsedScreenName {
+  num: number;
+  theme: "Light" | "Dark";
+  feature: string;
+}
+
 export interface ExtractedFrame {
   id: string;
   name: string;
@@ -163,6 +170,22 @@ export interface ExtractedFrame {
     details: string;
   }>;
   interactions?: FigmaPrototypeConnection[];
+  /** True when the screen is a rasterized PNG stub (single Rectangle child with IMAGE fill) */
+  isRasterized?: boolean;
+  /** Parsed screen-name components, present when name matches `^\d+_(Light|Dark)_.+` */
+  screenGroup?: ParsedScreenName;
+}
+
+/**
+ * Groups Light and Dark variants of a single numbered screen.
+ * Key format: `{num}_{feature}` (e.g. "54_create food - filled form")
+ */
+export interface ScreenGroup {
+  key: string;
+  num: number;
+  feature: string;
+  light?: ExtractedFrame;
+  dark?: ExtractedFrame;
 }
 
 export interface ComponentVariant {
@@ -199,6 +222,10 @@ export interface CollectionResults {
   interactions: FlowConnection[];
   effects: Map<string, { type: string; count: number }>;
   layerPatterns: Map<string, LayerNamePattern>;
+  /** Text labels extracted from Container flow-map frames */
+  flowMapLabels: string[];
+  /** Grouped screen inventory keyed by `{num}_{feature}` */
+  screenGroups: Map<string, ScreenGroup>;
 }
 
 export interface ExtractionResult {
@@ -218,7 +245,7 @@ export interface MarkdownTemplate {
   type: TemplateType;
   name: string;
   description: string;
-  sections: ("overview" | "colors" | "typography" | "components" | "interactions" | "layout" | "effects" | "accessibility" | "screens" | "instructions" | "assets")[];
+  sections: ("overview" | "colors" | "typography" | "components" | "interactions" | "layout" | "effects" | "accessibility" | "screens" | "instructions" | "assets" | "flowmap")[];
 }
 
 export type UIPhase = "idle" | "loading" | "done" | "error";
