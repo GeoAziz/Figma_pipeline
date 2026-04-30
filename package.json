@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
+    "type-check:tests": "tsc --noEmit -p tsconfig.test.json",
     "test": "jest"
   },
   "dependencies": {
