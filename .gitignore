@@ -47,3 +47,7 @@ Thumbs.db
 # package-lock.json
 # yarn.lock
 # pnpm-lock.yaml
+
+.github/Analyse_Codebase_skill.md
+nutrio---calorie-counter-app-ui-kit-(preview)-spec.md
+.github/workflows/Analyse_Codebase_skill.md
