@@ -56,6 +56,11 @@ export interface FigmaLayoutGrid {
   gutterSize?: number;
 }
 
+export interface FigmaConstraint {
+  horizontal?: string;
+  vertical?: string;
+}
+
 export interface FigmaPrototypeConnection {
   nodeID: string;
   navigationType: "NAVIGATE" | "SWAP" | "OVERLAY" | "BACK" | "CLOSE";
@@ -132,7 +137,137 @@ export interface FigmaFileResponse {
   lastModified?: string;
   document: FigmaDocument;
   components?: Record<string, { name: string }>;
-  styles?: Record<string, { name: string }>;
+  styles?: Record<string, { name: string; styleType?: string; description?: string }>;
+}
+
+export interface ExtractedStyleToken {
+  id: string;
+  name: string;
+  styleType: string;
+  description?: string;
+}
+
+export interface ExtractedVariableToken {
+  id: string;
+  name: string;
+  resolvedType: string;
+  valuesByMode: Record<string, string>;
+  scopes?: string[];
+}
+
+// ============================================================================
+// Wave 2 Enhancements: Responsiveness, Tokens, Topology, Diagnostics, Assets
+// ============================================================================
+
+export interface ExtractedConstraint {
+  nodeId: string;
+  nodeName: string;
+  horizontal: string;
+  vertical: string;
+  horizontalResizing: "FIXED" | "HUG" | "FILL";
+  verticalResizing: "FIXED" | "HUG" | "FILL";
+}
+
+export interface LayoutGridInfo {
+  pattern: "COLUMNS" | "ROWS" | "GRID";
+  sectionSize: number;
+  count?: number;
+  gutterSize?: number;
+  offset?: number;
+  visible: boolean;
+}
+
+export interface ResponsiveBreakpoint {
+  label: string;
+  minWidth?: number;
+  maxWidth?: number;
+  sizeClass: "mobile" | "tablet" | "desktop";
+}
+
+export interface TokenMode {
+  id: string;
+  name: string;
+  description?: string;
+  isDefault: boolean;
+}
+
+export interface DesignVariable {
+  id: string;
+  name: string;
+  resolvedType: string;
+  description?: string;
+  valuesByMode: Record<string, string>;
+  scopes: string[];
+  isAlias?: boolean;
+  aliasOf?: string;
+}
+
+export interface PropertyOverride {
+  nodeName: string;
+  property: string;
+  value: string | number | boolean;
+  mainComponentProperty?: string;
+}
+
+export interface ComponentInstance {
+  instanceId: string;
+  instanceName: string;
+  mainComponentId: string;
+  mainComponentName: string;
+  overrides: PropertyOverride[];
+}
+
+export interface NodePath {
+  nodeId: string;
+  nodeName: string;
+  path: string[]; // Ancestry path: ["Page", "Section", "Component"]
+  fullPath: string; // Dot-separated path string for location tracking
+  pageId: string;
+  pageName: string;
+  depth: number;
+}
+
+export interface PageInfo {
+  id: string;
+  name: string;
+  screenCount: number;
+  componentCount: number;
+  hasVariables: boolean;
+  hasStyles: boolean;
+}
+
+export interface Asset {
+  id: string;
+  name: string;
+  type: "ICON" | "ILLUSTRATION" | "BACKGROUND" | "PATTERN" | "IMAGE" | "LOGO";
+  nodeId: string;
+  pageName: string;
+  dimensions: { width: number; height: number };
+  fillColors?: string[];
+  usageCount: number;
+  exportFormats: ("PNG" | "SVG" | "PDF")[];
+}
+
+export interface AssetManifest {
+  totalAssets: number;
+  assetsByType: Record<string, Asset[]>;
+  assetsByUsage: Record<string, Asset[]>;
+  deterministic: boolean; // true if list is stable across runs
+}
+
+export interface ExtractionDiagnostics {
+  visitedNodes: number;
+  pagesScanned: number;
+  screensDetected: number;
+  screenLikeFrames: number;
+  metadataFiltered: number;
+  componentInstanceLabelFiltered: number;
+  rasterizedScreens: number;
+  constraintsExtracted: number;
+  variablesExtracted: number;
+  assetsIdentified: number;
+  extractionConfidence: number; // 0-100 score
+  skippedReasons: Record<string, number>; // Reason -> count map
 }
 
 export interface ExtractedColor {
@@ -174,6 +309,21 @@ export interface ExtractedFrame {
   isRasterized?: boolean;
   /** Parsed screen-name components, present when name matches `^\d+_(Light|Dark)_.+` */
   screenGroup?: ParsedScreenName;
+  responsiveness?: {
+    hasAutoLayout: boolean;
+    hasLayoutGrids: boolean;
+    layoutGridCount: number;
+    childConstraintCount: number;
+    wrapMode?: string;
+    sizeClass: "mobile" | "tablet" | "desktop";
+  };
+  constraints?: ExtractedConstraint[];
+  layoutGrids?: LayoutGridInfo[];
+  variables?: DesignVariable[];
+  componentInstances?: ComponentInstance[];
+  nodePath?: NodePath;
+  pageName?: string;
+  breakpoints?: ResponsiveBreakpoint[];
 }
 
 /**
@@ -205,6 +355,10 @@ export interface ExtractedComponent {
     mode: string;
     hasAutoLayout: boolean;
   };
+  instances?: ComponentInstance[];
+  constraints?: ExtractedConstraint[];
+  variables?: DesignVariable[];
+  pageName?: string;
 }
 
 export interface FlowConnection {
@@ -226,6 +380,16 @@ export interface CollectionResults {
   flowMapLabels: string[];
   /** Grouped screen inventory keyed by `{num}_{feature}` */
   screenGroups: Map<string, ScreenGroup>;
+  diagnostics: ExtractionDiagnostics;
+  /** Wave 2: Page-level information */
+  pages: PageInfo[];
+  /** Wave 2: Design variables and tokens */
+  variables: Map<string, DesignVariable>;
+  tokenModes: TokenMode[];
+  /** Wave 2: Asset inventory */
+  assets: Asset[];
+  /** Wave 2: Node paths for layer topology */
+  nodePaths: Map<string, NodePath>;
 }
 
 export interface ExtractionResult {
@@ -237,6 +401,18 @@ export interface ExtractionResult {
   components: ExtractedComponent[];
   interactions: FlowConnection[];
   effects: Map<string, { type: string; count: number }>;
+  styleTokens: ExtractedStyleToken[];
+  variableTokens: ExtractedVariableToken[];
+  diagnostics: ExtractionDiagnostics;
+  /** Wave 2: Variables and token modes */
+  variables: Map<string, DesignVariable>;
+  tokenModes: TokenMode[];
+  /** Wave 2: Pages */
+  pages: PageInfo[];
+  /** Wave 2: Assets */
+  assets: Asset[];
+  /** Wave 2: Node paths */
+  nodePaths: Map<string, NodePath>;
 }
 
 export type TemplateType = "minimal" | "full" | "accessibility";
@@ -245,7 +421,7 @@ export interface MarkdownTemplate {
   type: TemplateType;
   name: string;
   description: string;
-  sections: ("overview" | "colors" | "typography" | "components" | "interactions" | "layout" | "effects" | "accessibility" | "screens" | "instructions" | "assets" | "flowmap")[];
+  sections: ("overview" | "colors" | "typography" | "components" | "interactions" | "layout" | "effects" | "accessibility" | "screens" | "instructions" | "assets" | "flowmap" | "tokens" | "diagnostics")[];
 }
 
 export type UIPhase = "idle" | "loading" | "done" | "error";

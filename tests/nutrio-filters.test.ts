@@ -57,6 +57,25 @@ function emptyResults(): CollectionResults {
     layerPatterns: new Map(),
     flowMapLabels: [],
     screenGroups: new Map(),
+    diagnostics: {
+      visitedNodes: 0,
+      pagesScanned: 0,
+      screensDetected: 0,
+      screenLikeFrames: 0,
+      metadataFiltered: 0,
+      componentInstanceLabelFiltered: 0,
+      rasterizedScreens: 0,
+      constraintsExtracted: 0,
+      variablesExtracted: 0,
+      assetsIdentified: 0,
+      extractionConfidence: 0,
+      skippedReasons: {},
+    },
+    pages: [],
+    variables: new Map(),
+    tokenModes: [],
+    assets: [],
+    nodePaths: new Map(),
   };
 }
 
@@ -113,11 +132,11 @@ describe("isMetadataFrame", () => {
     expect(isMetadataFrame(makeFrame({ id: "5", name: "Navigation" }))).toBe(true);
   });
 
-  it("flags frames by dimension heuristic (width > 800)", () => {
-    expect(isMetadataFrame(makeFrame({ id: "6", name: "Some Doc", absoluteBoundingBox: { x: 0, y: 0, width: 2200, height: 5738 } }))).toBe(true);
+  it("does not flag unknown large frames by dimensions alone", () => {
+    expect(isMetadataFrame(makeFrame({ id: "6", name: "Some Doc", absoluteBoundingBox: { x: 0, y: 0, width: 2200, height: 5738 } }))).toBe(false);
   });
 
-  it("flags Navigation Marker by height === 152", () => {
+  it("flags Navigation Marker by explicit name", () => {
     expect(isMetadataFrame(makeFrame({ id: "7", name: "Navigation Marker", absoluteBoundingBox: { x: 0, y: 0, width: 430, height: 152 } }))).toBe(true);
   });
 

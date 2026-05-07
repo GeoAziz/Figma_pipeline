@@ -55,7 +55,7 @@ export default function FigmaToMarkdown(): JSX.Element {
       // Step 1 – Fetch file
       setProgress("Fetching file structure from Figma…");
       const fileData = (await figmaFetch(
-        `/files/${key}?depth=3`,
+        `/files/${key}?depth=8`,
         token
       )) as FigmaFileResponse;
       setStep(1);
@@ -72,12 +72,29 @@ export default function FigmaToMarkdown(): JSX.Element {
         layerPatterns: new Map(),
         flowMapLabels: [],
         screenGroups: new Map(),
+        diagnostics: {
+          visitedNodes: 0,
+          pagesScanned: 0,
+          screensDetected: 0,
+          screenLikeFrames: 0,
+          metadataFiltered: 0,
+          componentInstanceLabelFiltered: 0,
+          rasterizedScreens: 0,
+          constraintsExtracted: 0,
+          variablesExtracted: 0,
+          assetsIdentified: 0,
+          extractionConfidence: 0,
+          skippedReasons: {},
+        },
+        pages: [],
+        variables: new Map(),
+        tokenModes: [],
+        assets: [],
+        nodePaths: new Map(),
       };
 
       fileData.document.children.forEach((pageNode) => {
-        pageNode.children?.forEach((child) =>
-          collectAll(child, 1, treeResults)
-        );
+        collectAll(pageNode, 0, treeResults);
       });
 
       // Dedup frames (no slice cap — all screens are included)
@@ -127,6 +144,11 @@ export default function FigmaToMarkdown(): JSX.Element {
         template,
         flowMapLabels: treeResults.flowMapLabels,
         screenGroups: treeResults.screenGroups,
+        variables: treeResults.variables,
+        tokenModes: treeResults.tokenModes,
+        pages: treeResults.pages,
+        diagnostics: treeResults.diagnostics,
+        assets: treeResults.assets,
       });
 
       setResult({
@@ -138,6 +160,14 @@ export default function FigmaToMarkdown(): JSX.Element {
         components: treeResults.components,
         interactions: treeResults.interactions,
         effects: treeResults.effects,
+        styleTokens: [],
+        variableTokens: [],
+        diagnostics: treeResults.diagnostics,
+        variables: treeResults.variables,
+        tokenModes: treeResults.tokenModes,
+        pages: treeResults.pages,
+        assets: treeResults.assets,
+        nodePaths: treeResults.nodePaths,
       });
       setMarkdown(md);
       setStep(3);

@@ -1,4 +1,15 @@
-import { FigmaNode, CollectionResults, ParsedScreenName } from "./types";
+import {
+  FigmaNode,
+  CollectionResults,
+  ParsedScreenName,
+  ExtractedConstraint,
+  LayoutGridInfo,
+  NodePath,
+  ComponentInstance,
+  Asset,
+  ExtractionDiagnostics,
+  PropertyOverride,
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Screen-discovery constants & helpers
@@ -38,12 +49,20 @@ export function isComponentInstanceLabel(name: string): boolean {
 export function isMetadataFrame(node: FigmaNode): boolean {
   const lower = node.name.toLowerCase();
   if (METADATA_NAME_BLOCKLIST.some((b) => lower.includes(b))) return true;
-  const bb = node.absoluteBoundingBox;
-  if (bb) {
-    if (bb.width > 800 || bb.height > 1500) return true;
-    if (bb.height === 152) return true;
-  }
+  if (lower === "navigation marker") return true;
   return false;
+}
+
+/**
+ * Geometry fallback for screen discovery when naming conventions are absent.
+ * We keep this intentionally permissive to avoid silently dropping real screens.
+ */
+function isLikelyScreenByGeometry(node: FigmaNode): boolean {
+  const bb = node.absoluteBoundingBox;
+  if (!bb) return false;
+  if (bb.width < 280 || bb.height < 500) return false;
+  if ((node.children?.length || 0) === 0) return false;
+  return true;
 }
 
 /**
@@ -121,10 +140,11 @@ export async function figmaFetch(
 /**
  * Recursively collect frames, components, colors, fonts, layout, effects, and interactions.
  *
- * Screen-discovery rules (applied at depth 1 — direct canvas children):
- *  - Only FRAME nodes whose name matches `SCREEN_NAME_REGEX` are added to `results.frames`.
+ * Screen-discovery rules:
+ *  - FRAME nodes are added to `results.frames` when they match either naming convention
+ *    or geometry fallback.
  *  - Container flow-map frames have their TEXT descendants extracted to `results.flowMapLabels`.
- *  - Metadata / documentation frames are skipped entirely.
+ *  - Metadata / documentation frames are excluded from screen inventory but still traversed for tokens.
  *  - Rasterized stub screens are flagged; their children are not traversed for tokens.
  */
 export function collectAll(
@@ -140,35 +160,47 @@ export function collectAll(
     layerPatterns: new Map(),
     flowMapLabels: [],
     screenGroups: new Map(),
+    diagnostics: {
+      visitedNodes: 0,
+      pagesScanned: 0,
+      screensDetected: 0,
+      screenLikeFrames: 0,
+      metadataFiltered: 0,
+      componentInstanceLabelFiltered: 0,
+      rasterizedScreens: 0,
+      constraintsExtracted: 0,
+      variablesExtracted: 0,
+      assetsIdentified: 0,
+      extractionConfidence: 0,
+      skippedReasons: {},
+    },
+    pages: [],
+    variables: new Map(),
+    tokenModes: [],
+    assets: [],
+    nodePaths: new Map(),
   }
 ): CollectionResults {
   if (!node) return results;
 
-  // ── Depth-1 gate: apply canvas-level filtering ──────────────────────────
-  if (depth === 1) {
-    // Container flow-map frames: extract text labels and stop.
-    if (isContainerFlowMap(node)) {
-      results.flowMapLabels.push(...extractTextLabels(node));
-      return results;
-    }
+  results.diagnostics.visitedNodes++;
 
-    // Non-screen FRAME nodes (metadata, docs, etc.): skip entirely.
-    if (
-      node.type === "FRAME" &&
-      (!SCREEN_NAME_REGEX.test(node.name) || isComponentInstanceLabel(node.name))
-    ) {
-      if (isMetadataFrame(node) || !SCREEN_NAME_REGEX.test(node.name)) {
-        return results;
-      }
-    }
+  // Track page scans at depth 0
+  if (depth === 0 && node.type === "CANVAS") {
+    results.diagnostics.pagesScanned++;
   }
 
-  // ── Screen identification (depth-1 FRAMEs matching naming convention) ───
+  // Extract labels from large flow-map containers.
+  if (depth === 1 && isContainerFlowMap(node)) {
+    results.flowMapLabels.push(...extractTextLabels(node));
+  }
+
+  // ── Screen identification ────────────────────────────────────────────────
   const isScreen =
     node.type === "FRAME" &&
-    depth === 1 &&
-    SCREEN_NAME_REGEX.test(node.name) &&
-    !isComponentInstanceLabel(node.name);
+    !isComponentInstanceLabel(node.name) &&
+    !isMetadataFrame(node) &&
+    (SCREEN_NAME_REGEX.test(node.name) || isLikelyScreenByGeometry(node));
 
   if (isScreen) {
     const rasterized = isRasterizedStub(node);
@@ -206,9 +238,24 @@ export function collectAll(
       interactions,
       isRasterized: rasterized,
       screenGroup: parsed ?? undefined,
+      constraints: extractConstraints(node),
+      layoutGrids: extractLayoutGrids(node),
+      componentInstances: extractComponentInstances(node),
+      pageName: node.name,
+      responsiveness: {
+        hasAutoLayout: !!node.layoutMode,
+        hasLayoutGrids: ((node as any).layoutGrids?.length ?? 0) > 0,
+        layoutGridCount: ((node as any).layoutGrids?.length ?? 0),
+        childConstraintCount: extractConstraints(node).length,
+        sizeClass: detectSizeClass(node),
+      },
     };
 
     results.frames.push(frame);
+    results.diagnostics.screensDetected++;
+    if (isLikelyScreenByGeometry(node)) {
+      results.diagnostics.screenLikeFrames++;
+    }
 
     // Maintain grouped screen-inventory map
     if (parsed) {
@@ -249,6 +296,8 @@ export function collectAll(
       node,
       variants,
       layoutInfo,
+      constraints: extractConstraints(node),
+      instances: extractComponentInstances(node),
     });
   }
 
@@ -302,14 +351,33 @@ export function collectAll(
   // Parse layer naming patterns
   parseLayerNaming(node.name, results);
 
-  // Traverse children up to depth 4
-  if (node.children && Array.isArray(node.children) && depth < 4) {
+  // Wave 2: Extract assets and diagnostics
+  const pageName = depth === 0 ? node.name : "Unknown Page";
+  extractAssets(node, pageName, results.assets);
+  if (results.assets.length > 0) {
+    results.diagnostics.assetsIdentified = results.assets.length;
+  }
+
+  // Traverse children deeply enough to cover nested section/page structures.
+  if (node.children && Array.isArray(node.children) && depth < 12) {
     node.children.forEach((child) =>
       collectAll(child, depth + 1, results)
     );
   }
 
   return results;
+}
+
+/**
+ * Detect size class based on frame dimensions
+ */
+function detectSizeClass(node: FigmaNode): "mobile" | "tablet" | "desktop" {
+  const bb = node.absoluteBoundingBox;
+  if (!bb) return "mobile";
+
+  if (bb.width < 600) return "mobile";
+  if (bb.width < 1200) return "tablet";
+  return "desktop";
 }
 
 /**
@@ -441,6 +509,221 @@ function parseLayerNaming(name: string, results: CollectionResults): void {
       }
     }
   }
+}
+
+/**
+ * Extract constraints for a frame and its children
+ */
+export function extractConstraints(node: FigmaNode): ExtractedConstraint[] {
+  const constraints: ExtractedConstraint[] = [];
+
+  if (node.children && Array.isArray(node.children)) {
+    node.children.forEach((child) => {
+      const bb = child.absoluteBoundingBox;
+      if (bb) {
+        constraints.push({
+          nodeId: child.id,
+          nodeName: child.name,
+          horizontal: (child as any).constraints?.horizontal || "FIXED",
+          vertical: (child as any).constraints?.vertical || "FIXED",
+          horizontalResizing: (child as any).horizontalResizing || "FIXED",
+          verticalResizing: (child as any).verticalResizing || "FIXED",
+        });
+      }
+    });
+  }
+
+  return constraints;
+}
+
+/**
+ * Extract layout grids from a node
+ */
+export function extractLayoutGrids(node: FigmaNode): LayoutGridInfo[] {
+  const grids: LayoutGridInfo[] = [];
+
+  const gridProp = (node as any).layoutGrids;
+  if (gridProp && Array.isArray(gridProp)) {
+    gridProp.forEach((grid: any) => {
+      grids.push({
+        pattern: grid.pattern || "GRID",
+        sectionSize: grid.sectionSize || 0,
+        count: grid.count,
+        gutterSize: grid.gutterSize,
+        offset: grid.offset,
+        visible: grid.visible !== false,
+      });
+    });
+  }
+
+  return grids;
+}
+
+/**
+ * Build a node path for layer topology tracking
+ */
+export function buildNodePath(
+  nodeId: string,
+  nodeName: string,
+  pageId: string,
+  pageName: string,
+  ancestryPath: string[],
+  currentDepth: number
+): NodePath {
+  const fullPath = ancestryPath.length > 0 ? ancestryPath.join(".") + "." + nodeName : nodeName;
+
+  return {
+    nodeId,
+    nodeName,
+    path: ancestryPath,
+    fullPath,
+    pageId,
+    pageName,
+    depth: currentDepth,
+  };
+}
+
+/**
+ * Extract component instances with overrides
+ */
+export function extractComponentInstances(node: FigmaNode): ComponentInstance[] {
+  const instances: ComponentInstance[] = [];
+
+  if (node.children && Array.isArray(node.children)) {
+    node.children.forEach((child) => {
+      // Detect component instances by presence of mainComponent ID
+      const mainCompId = (child as any).mainComponent;
+      if (mainCompId) {
+        const overrides: PropertyOverride[] = [];
+
+        // Extract property overrides if available
+        const componentProps = (child as any).componentProperties;
+        if (componentProps) {
+          Object.entries(componentProps).forEach(([propName, propValue]: [string, any]) => {
+            overrides.push({
+              nodeName: child.name,
+              property: propName,
+              value: propValue?.value ?? propValue,
+              mainComponentProperty: propName,
+            });
+          });
+        }
+
+        instances.push({
+          instanceId: child.id,
+          instanceName: child.name,
+          mainComponentId: mainCompId,
+          mainComponentName: child.name, // Placeholder; would need API lookup
+          overrides,
+        });
+      }
+
+      // Recursively extract nested instances
+      instances.push(...extractComponentInstances(child));
+    });
+  }
+
+  return instances;
+}
+
+/**
+ * Identify and extract asset nodes (icons, illustrations, backgrounds)
+ */
+export function extractAssets(node: FigmaNode, pageName: string, assets: Asset[]): void {
+  if (!node) return;
+
+  const bb = node.absoluteBoundingBox;
+
+  // Heuristic for icon: small square/rectangular shape (< 100x100px), often standalone
+  if (node.type === "COMPONENT" && bb && bb.width <= 100 && bb.height <= 100 && bb.width > 0) {
+    const asset: Asset = {
+      id: node.id,
+      name: node.name,
+      type: "ICON",
+      nodeId: node.id,
+      pageName,
+      dimensions: { width: bb.width, height: bb.height },
+      fillColors: extractAssetColors(node),
+      usageCount: 1,
+      exportFormats: ["SVG", "PNG"],
+    };
+    assets.push(asset);
+  }
+
+  // Heuristic for illustration/background: larger component or frame with multiple children
+  if ((node.type === "COMPONENT" || node.type === "FRAME") && bb && bb.width > 200 && (node.children?.length ?? 0) > 1) {
+    // Only if not already a screen (screens are handled separately)
+    const isScreen = node.type === "FRAME" && /^\d+_(Light|Dark)_/.test(node.name);
+    if (!isScreen) {
+      const asset: Asset = {
+        id: node.id,
+        name: node.name,
+        type: (node.children?.length ?? 0) > 5 ? "ILLUSTRATION" : "BACKGROUND",
+        nodeId: node.id,
+        pageName,
+        dimensions: { width: bb.width, height: bb.height },
+        fillColors: extractAssetColors(node),
+        usageCount: 1,
+        exportFormats: ["PNG", "SVG"],
+      };
+      assets.push(asset);
+    }
+  }
+
+  // Recursively process children
+  if (node.children && Array.isArray(node.children)) {
+    node.children.forEach((child) => extractAssets(child, pageName, assets));
+  }
+}
+
+/**
+ * Extract fill colors from an asset node
+ */
+function extractAssetColors(node: FigmaNode): string[] {
+  const colors: string[] = [];
+
+  if (node.fills && Array.isArray(node.fills)) {
+    node.fills.forEach((fill: any) => {
+      if (fill.type === "SOLID" && fill.color) {
+        const { r, g, b } = fill.color;
+        const hex = `#${[r, g, b]
+          .map((x) => Math.round(x * 255).toString(16).padStart(2, "0"))
+          .join("")}`;
+        if (!colors.includes(hex)) colors.push(hex);
+      }
+    });
+  }
+
+  if (node.children && Array.isArray(node.children)) {
+    node.children.forEach((child) => {
+      const childColors = extractAssetColors(child);
+      childColors.forEach((color) => {
+        if (!colors.includes(color)) colors.push(color);
+      });
+    });
+  }
+
+  return colors;
+}
+
+/**
+ * Initialize extraction diagnostics with zero counts
+ */
+export function initializeDiagnostics(): ExtractionDiagnostics {
+  return {
+    visitedNodes: 0,
+    pagesScanned: 0,
+    screensDetected: 0,
+    screenLikeFrames: 0,
+    metadataFiltered: 0,
+    componentInstanceLabelFiltered: 0,
+    rasterizedScreens: 0,
+    constraintsExtracted: 0,
+    variablesExtracted: 0,
+    assetsIdentified: 0,
+    extractionConfidence: 0,
+    skippedReasons: {},
+  };
 }
 
 /**

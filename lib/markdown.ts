@@ -8,6 +8,11 @@ import {
   TemplateType,
   MarkdownTemplate,
   ScreenGroup,
+  DesignVariable,
+  TokenMode,
+  PageInfo,
+  ExtractionDiagnostics,
+  Asset,
 } from "./types";
 import { hexToRgb, parseScreenName } from "./figma";
 
@@ -26,6 +31,15 @@ interface GenerateMarkdownParams {
   flowMapLabels?: string[];
   /** Grouped screen inventory (built during collection) */
   screenGroups?: Map<string, ScreenGroup>;
+  /** Wave 2: Design variables and token modes */
+  variables?: Map<string, DesignVariable>;
+  tokenModes?: TokenMode[];
+  /** Wave 2: Page information */
+  pages?: PageInfo[];
+  /** Wave 2: Extraction diagnostics */
+  diagnostics?: ExtractionDiagnostics;
+  /** Wave 2: Extracted assets */
+  assets?: Asset[];
 }
 
 // Pre-built markdown templates
@@ -39,7 +53,7 @@ export const MARKDOWN_TEMPLATES: Record<TemplateType, MarkdownTemplate> = {
   full: {
     type: "full",
     name: "Full Specification",
-    description: "Complete spec with components, layout, effects, and interactions",
+    description: "Complete spec with components, layout, effects, interactions, tokens, and diagnostics",
     sections: [
       "overview",
       "colors",
@@ -48,8 +62,10 @@ export const MARKDOWN_TEMPLATES: Record<TemplateType, MarkdownTemplate> = {
       "interactions",
       "layout",
       "effects",
+      "tokens",
       "flowmap",
       "screens",
+      "diagnostics",
       "instructions",
       "assets",
     ],
@@ -64,6 +80,7 @@ export const MARKDOWN_TEMPLATES: Record<TemplateType, MarkdownTemplate> = {
       "typography",
       "components",
       "accessibility",
+      "tokens",
       "flowmap",
       "screens",
       "instructions",
@@ -87,6 +104,11 @@ export function generateMarkdown({
   effects,
   flowMapLabels = [],
   screenGroups,
+  variables = new Map(),
+  tokenModes = [],
+  pages = [],
+  diagnostics,
+  assets = [],
 }: GenerateMarkdownParams): string {
   const selectedTemplate = MARKDOWN_TEMPLATES[template];
   const now = new Date().toISOString().split("T")[0];
@@ -139,6 +161,15 @@ export function generateMarkdown({
         break;
       case "assets":
         md += buildAssetChecklist(frames, fileKey);
+        break;
+      case "tokens":
+        md += buildTokensAndVariables(variables, tokenModes);
+        md += buildResponsiveness(frames);
+        break;
+      case "diagnostics":
+        md += buildDiagnostics(diagnostics ?? { visitedNodes: 0, pagesScanned: 0, screensDetected: 0, screenLikeFrames: 0, metadataFiltered: 0, componentInstanceLabelFiltered: 0, rasterizedScreens: 0, constraintsExtracted: 0, variablesExtracted: 0, assetsIdentified: 0, extractionConfidence: 0, skippedReasons: {} }, frames);
+        md += buildPageTopology(pages);
+        md += buildAssetManifestSection(assets);
         break;
     }
   });
@@ -657,4 +688,168 @@ GET https://api.figma.com/v1/images/${fileKey}?ids={ICON_NODE_IDS}&format=svg
 \`\`\`
 
 `;
+}
+
+// ============================================================================
+// Wave 2: Responsiveness, Tokens, Diagnostics, Topology, Assets
+// ============================================================================
+
+function buildResponsiveness(frames: ExtractedFrame[]): string {
+  const framesWithResponsiveness = frames.filter((f) => f.responsiveness);
+
+  if (framesWithResponsiveness.length === 0) {
+    return "## 📱 Responsiveness\n\n_No responsive designs detected in screens._\n\n";
+  }
+
+  let md = "## 📱 Responsive Design\n\n";
+  md += `${framesWithResponsiveness.length} screens include responsive layout settings.\n\n`;
+
+  const bySize = new Map<string, ExtractedFrame[]>();
+  framesWithResponsiveness.forEach((f) => {
+    const size = f.responsiveness!.sizeClass;
+    if (!bySize.has(size)) bySize.set(size, []);
+    bySize.get(size)!.push(f);
+  });
+
+  md += "### Size Classes\n\n";
+  md += "| Size Class | Count | Breakpoint |\n";
+  md += "|-----------|-------|------------|\n";
+  md += `| Mobile | ${bySize.get("mobile")?.length ?? 0} | < 600px |\n`;
+  md += `| Tablet | ${bySize.get("tablet")?.length ?? 0} | 600px – 1200px |\n`;
+  md += `| Desktop | ${bySize.get("desktop")?.length ?? 0} | > 1200px |\n\n`;
+
+  md += "### Layout Modes\n\n";
+  const autoLayoutCount = framesWithResponsiveness.filter((f) => f.responsiveness?.hasAutoLayout).length;
+  const gridCount = framesWithResponsiveness.filter((f) => f.responsiveness?.hasLayoutGrids).length;
+
+  md += `- **Auto Layout:** ${autoLayoutCount} screens\n`;
+  md += `- **Layout Grids:** ${gridCount} screens\n\n`;
+
+  return md;
+}
+
+function buildTokensAndVariables(variables: Map<string, DesignVariable>, tokenModes: TokenMode[]): string {
+  if (variables.size === 0 && tokenModes.length === 0) {
+    return "## 🎨 Design Tokens\n\n_No design variables or tokens detected._\n\n";
+  }
+
+  let md = "## 🎨 Design Tokens & Variables\n\n";
+
+  if (tokenModes.length > 0) {
+    md += "### Token Modes\n\n";
+    md += "| Mode | Description |\n";
+    md += "|------|-------------|\n";
+    tokenModes.forEach((mode) => {
+      md += `| **${mode.name}** | ${mode.description || "(no description)"} |\n`;
+    });
+    md += "\n";
+  }
+
+  if (variables.size > 0) {
+    md += "### Variables\n\n";
+    md += `Total: **${variables.size}** variables\n\n`;
+
+    const byType = new Map<string, DesignVariable[]>();
+    variables.forEach((v) => {
+      if (!byType.has(v.resolvedType)) byType.set(v.resolvedType, []);
+      byType.get(v.resolvedType)!.push(v);
+    });
+
+    byType.forEach((vars, type) => {
+      md += `#### ${type} (${vars.length})\n\n`;
+      vars.slice(0, 10).forEach((v) => {
+        md += `- **${v.name}**: ${Object.entries(v.valuesByMode).map(([m, val]) => `${m}=${val}`).join(" | ")}\n`;
+      });
+      if (vars.length > 10) {
+        md += `- ... and ${vars.length - 10} more\n`;
+      }
+      md += "\n";
+    });
+  }
+
+  return md;
+}
+
+function buildDiagnostics(diagnostics: ExtractionDiagnostics, frames: ExtractedFrame[]): string {
+  let md = "## 📊 Extraction Diagnostics\n\n";
+
+  md += "### Coverage Summary\n\n";
+  md += `| Metric | Value |\n`;
+  md += `|--------|-------|\n`;
+  md += `| Nodes Visited | ${diagnostics.visitedNodes} |\n`;
+  md += `| Pages Scanned | ${diagnostics.pagesScanned} |\n`;
+  md += `| Screens Detected | ${diagnostics.screensDetected} |\n`;
+  md += `| Live Screens | ${frames.filter((f) => !f.isRasterized).length} |\n`;
+  md += `| Rasterized Stubs | ${diagnostics.rasterizedScreens} |\n`;
+  md += `| Extraction Confidence | ${diagnostics.extractionConfidence}% |\n\n`;
+
+  if (diagnostics.metadataFiltered > 0 || diagnostics.componentInstanceLabelFiltered > 0) {
+    md += "### Filtered Items\n\n";
+    if (diagnostics.metadataFiltered > 0) {
+      md += `- **Metadata/Documentation:** ${diagnostics.metadataFiltered} frames\n`;
+    }
+    if (diagnostics.componentInstanceLabelFiltered > 0) {
+      md += `- **Component Instance Labels:** ${diagnostics.componentInstanceLabelFiltered} frames\n`;
+    }
+    md += "\n";
+  }
+
+  if (Object.keys(diagnostics.skippedReasons).length > 0) {
+    md += "### Skip Reasons\n\n";
+    Object.entries(diagnostics.skippedReasons).forEach(([reason, count]) => {
+      md += `- **${reason}:** ${count} nodes\n`;
+    });
+    md += "\n";
+  }
+
+  return md;
+}
+
+function buildPageTopology(pages: PageInfo[]): string {
+  if (pages.length === 0) {
+    return "## 🗺️ Page Structure\n\n_No page information available._\n\n";
+  }
+
+  let md = "## 🗺️ Page Structure & Navigation\n\n";
+  md += "| Page | Screens | Components | Variables |\n";
+  md += "|------|---------|------------|----------|\n";
+
+  pages.forEach((page) => {
+    md += `| ${page.name} | ${page.screenCount} | ${page.componentCount} | ${page.hasVariables ? "✓" : "—"} |\n`;
+  });
+
+  md += "\n";
+  return md;
+}
+
+function buildAssetManifestSection(assets: Asset[]): string {
+  if (assets.length === 0) {
+    return "## 🎭 Asset Manifest\n\n_No assets extracted._\n\n";
+  }
+
+  let md = "## 🎭 Asset Manifest\n\n";
+  md += `**Total Assets:** ${assets.length}\n\n`;
+
+  // Group by type
+  const byType = new Map<string, Asset[]>();
+  assets.forEach((a) => {
+    if (!byType.has(a.type)) byType.set(a.type, []);
+    byType.get(a.type)!.push(a);
+  });
+
+  md += "### Assets by Type\n\n";
+  byType.forEach((assetList, type) => {
+    md += `#### ${type} (${assetList.length})\n\n`;
+    md += "| Asset | Dimensions | Colors | Formats |\n";
+    md += "|-------|------------|--------|----------|\n";
+    assetList.slice(0, 10).forEach((a) => {
+      md += `| ${a.name} | ${a.dimensions.width}×${a.dimensions.height}px | ${a.fillColors?.length ?? 0} | ${a.exportFormats.join(", ")} |\n`;
+    });
+    if (assetList.length > 10) {
+      md += `| ... | ... | ... | ... |\n`;
+    }
+    md += "\n";
+  });
+
+  return md;
 }
