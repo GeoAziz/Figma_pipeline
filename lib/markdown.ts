@@ -40,6 +40,8 @@ interface GenerateMarkdownParams {
   diagnostics?: ExtractionDiagnostics;
   /** Wave 2: Extracted assets */
   assets?: Asset[];
+  /** Count of named styles fetched from /files/{key}/styles (separate namespace from fileData.styles) */
+  namedStyleCount?: number;
 }
 
 // Pre-built markdown templates
@@ -109,6 +111,7 @@ export function generateMarkdown({
   pages = [],
   diagnostics,
   assets = [],
+  namedStyleCount,
 }: GenerateMarkdownParams): string {
   const selectedTemplate = MARKDOWN_TEMPLATES[template];
   const now = new Date().toISOString().split("T")[0];
@@ -127,7 +130,7 @@ export function generateMarkdown({
   selectedTemplate.sections.forEach((section) => {
     switch (section) {
       case "overview":
-        md += buildOverview(fileData, frames, components, groups);
+        md += buildOverview(fileData, frames, components, groups, namedStyleCount);
         break;
       case "colors":
         md += buildColorPalette(topColors, liveFrames.length, frames.length);
@@ -210,12 +213,21 @@ function buildOverview(
   fileData: FigmaFileResponse,
   frames: ExtractedFrame[],
   components: ExtractedComponent[],
-  groups: Map<string, ScreenGroup>
+  groups: Map<string, ScreenGroup>,
+  namedStyleCount?: number
 ): string {
   const pageNames = fileData.document.children.map((p) => p.name);
   const liveCount = frames.filter((f) => !f.isRasterized).length;
   const stubCount = frames.length - liveCount;
   const groupCount = groups.size;
+
+  // Prefer the dedicated styles endpoint count; fall back to inline styles from the file document
+  const styleCount =
+    namedStyleCount !== undefined
+      ? namedStyleCount
+      : fileData.styles
+        ? Object.keys(fileData.styles).length
+        : "N/A";
 
   return `## 📋 Project Overview
 
@@ -227,7 +239,7 @@ function buildOverview(
 | Rasterized Stubs | ${stubCount} (PNG-backed, no traversable children) |
 | Pages | ${pageNames.join(", ")} |
 | Components | ${components.length} |
-| Styles | ${fileData.styles ? Object.keys(fileData.styles).length : "N/A"} |
+| Named Styles | ${styleCount} |
 
 `;
 }

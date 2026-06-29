@@ -138,6 +138,128 @@ export async function figmaFetch(
 }
 
 /**
+ * Fetch design variables AND token modes from Figma file in a single API call.
+ * The Figma Variables REST API wraps everything under `meta`:
+ *   GET /files/{key}/variables/local → { meta: { variables: {...}, variableCollections: {...} } }
+ *
+ * Returns null when the endpoint is unavailable (free plan or insufficient scopes).
+ */
+export async function fetchVariablesData(
+  fileKey: string,
+  token: string
+): Promise<{ variables: Map<string, any>; tokenModes: any[] } | null> {
+  try {
+    const res = (await figmaFetch(`/files/${fileKey}/variables/local`, token)) as any;
+    const meta = res?.meta ?? res; // some proxy wrappers drop the meta envelope
+
+    // ── Variables ──────────────────────────────────────────────────────────
+    const variables = new Map<string, any>();
+    const rawVars = meta?.variables ?? {};
+    Object.values(rawVars).forEach((v: any) => {
+      // Resolve valuesByMode: values may be typed objects ({ type, value }) or primitives
+      const resolvedValues: Record<string, string> = {};
+      Object.entries(v.valuesByMode ?? {}).forEach(([modeId, val]: [string, any]) => {
+        if (val && typeof val === "object" && "type" in val) {
+          // Alias reference
+          if (val.type === "VARIABLE_ALIAS") {
+            resolvedValues[modeId] = `alias:${val.id}`;
+          } else if (val.r !== undefined) {
+            // COLOR value  { r, g, b, a }
+            const hex = `#${[val.r, val.g, val.b]
+              .map((x: number) => Math.round(x * 255).toString(16).padStart(2, "0"))
+              .join("")}`;
+            resolvedValues[modeId] = hex;
+          } else {
+            resolvedValues[modeId] = String(val.value ?? val);
+          }
+        } else {
+          resolvedValues[modeId] = String(val);
+        }
+      });
+
+      variables.set(v.id, {
+        id: v.id,
+        name: v.name,
+        resolvedType: v.resolvedType,
+        valuesByMode: resolvedValues,
+        scopes: v.scopes ?? [],
+        isAlias: v.isAlias ?? false,
+        aliasOf: v.aliasOf?.id,
+      });
+    });
+
+    // ── Token Modes (from variableCollections) ─────────────────────────────
+    const tokenModes: any[] = [];
+    const rawCollections = meta?.variableCollections ?? {};
+    Object.values(rawCollections).forEach((col: any) => {
+      (col.modes ?? []).forEach((mode: any) => {
+        tokenModes.push({
+          id: mode.modeId,
+          name: mode.name,
+          description: col.name, // collection name as context
+          isDefault: mode.modeId === col.defaultModeId,
+        });
+      });
+    });
+
+    return { variables, tokenModes };
+  } catch {
+    // Free plan / missing scopes — not a hard failure
+    return null;
+  }
+}
+
+/**
+ * @deprecated Use fetchVariablesData instead (single API call).
+ * Kept for back-compat if called externally.
+ */
+export async function fetchDesignVariables(
+  fileKey: string,
+  token: string
+): Promise<Map<string, any>> {
+  const data = await fetchVariablesData(fileKey, token);
+  return data?.variables ?? new Map();
+}
+
+/**
+ * @deprecated Use fetchVariablesData instead (single API call).
+ * Kept for back-compat if called externally.
+ */
+export async function fetchTokenModes(
+  fileKey: string,
+  token: string
+): Promise<any[]> {
+  const data = await fetchVariablesData(fileKey, token);
+  return data?.tokenModes ?? [];
+}
+
+/**
+ * Fetch named styles (text, color, effect styles) from Figma file
+ */
+export async function fetchNamedStyles(
+  fileKey: string,
+  token: string
+): Promise<Record<string, any>> {
+  const styles: Record<string, any> = {};
+  try {
+    const res = (await figmaFetch(`/files/${fileKey}/styles`, token)) as any;
+    if (res.meta && res.meta.styles) {
+      res.meta.styles.forEach((style: any) => {
+        styles[style.key] = {
+          id: style.id,
+          name: style.name,
+          styleType: style.style_type,
+          description: style.description,
+        };
+      });
+    }
+  } catch {
+    // Silently fail if styles API is not available
+  }
+  return styles;
+}
+
+/**
  * Recursively collect frames, components, colors, fonts, layout, effects, and interactions.
  *
  * Screen-discovery rules:
@@ -185,14 +307,46 @@ export function collectAll(
 
   results.diagnostics.visitedNodes++;
 
-  // Track page scans at depth 0
+  // Track page scans at depth 0 and build page info
   if (depth === 0 && node.type === "CANVAS") {
     results.diagnostics.pagesScanned++;
+
+    // Populate page info
+    const screenCount = (node.children ?? []).filter(
+      (child) =>
+        child.type === "FRAME" &&
+        !isComponentInstanceLabel(child.name) &&
+        !isMetadataFrame(child) &&
+        (SCREEN_NAME_REGEX.test(child.name) || isLikelyScreenByGeometry(child))
+    ).length;
+
+    const componentCount = (node.children ?? []).filter(
+      (child) => child.type === "COMPONENT" || child.type === "COMPONENT_SET"
+    ).length;
+
+    results.pages.push({
+      id: node.id,
+      name: node.name,
+      screenCount,
+      componentCount,
+      hasVariables: false,
+      hasStyles: false,
+    });
   }
 
   // Extract labels from large flow-map containers.
   if (depth === 1 && isContainerFlowMap(node)) {
     results.flowMapLabels.push(...extractTextLabels(node));
+  }
+
+  // Track filtered metadata frames
+  if (node.type === "FRAME" && depth === 1 && isMetadataFrame(node)) {
+    results.diagnostics.metadataFiltered++;
+  }
+
+  // Track filtered component instance labels
+  if (node.type === "FRAME" && depth === 1 && isComponentInstanceLabel(node.name)) {
+    results.diagnostics.componentInstanceLabelFiltered++;
   }
 
   // ── Screen identification ────────────────────────────────────────────────
@@ -228,6 +382,15 @@ export function collectAll(
       }
     });
 
+    const constraints = extractConstraints(node);
+    const layoutGrids = extractLayoutGrids(node);
+    const componentInstances = extractComponentInstances(node);
+
+    // Track extracted constraints
+    if (constraints.length > 0) {
+      results.diagnostics.constraintsExtracted += constraints.length;
+    }
+
     const frame = {
       id: node.id,
       name: node.name,
@@ -238,15 +401,15 @@ export function collectAll(
       interactions,
       isRasterized: rasterized,
       screenGroup: parsed ?? undefined,
-      constraints: extractConstraints(node),
-      layoutGrids: extractLayoutGrids(node),
-      componentInstances: extractComponentInstances(node),
+      constraints,
+      layoutGrids,
+      componentInstances,
       pageName: node.name,
       responsiveness: {
         hasAutoLayout: !!node.layoutMode,
-        hasLayoutGrids: ((node as any).layoutGrids?.length ?? 0) > 0,
-        layoutGridCount: ((node as any).layoutGrids?.length ?? 0),
-        childConstraintCount: extractConstraints(node).length,
+        hasLayoutGrids: layoutGrids.length > 0,
+        layoutGridCount: layoutGrids.length,
+        childConstraintCount: constraints.length,
         sizeClass: detectSizeClass(node),
       },
     };
@@ -255,6 +418,11 @@ export function collectAll(
     results.diagnostics.screensDetected++;
     if (isLikelyScreenByGeometry(node)) {
       results.diagnostics.screenLikeFrames++;
+    }
+
+    // Track rasterized screens
+    if (rasterized) {
+      results.diagnostics.rasterizedScreens++;
     }
 
     // Maintain grouped screen-inventory map
@@ -301,13 +469,11 @@ export function collectAll(
     });
   }
 
-  // Extract solid fill colors
+  // Extract fill colors (solid and gradients)
   if (node.fills && Array.isArray(node.fills)) {
-    node.fills
-      .filter((f): f is { type: "SOLID"; color: { r: number; g: number; b: number; a?: number } } =>
-        f.type === "SOLID" && f.color !== undefined
-      )
-      .forEach((f) => {
+    node.fills.forEach((f: any) => {
+      // Extract from solid fills
+      if (f.type === "SOLID" && f.color) {
         const { r, g, b, a = 1 } = f.color;
         const hex = `#${[r, g, b]
           .map((x) =>
@@ -327,7 +493,40 @@ export function collectAll(
 
         const color = results.colors.get(hex);
         if (color) color.usages++;
-      });
+      }
+      // Extract from gradient stop colors
+      else if (
+        (f.type === "GRADIENT_LINEAR" ||
+          f.type === "GRADIENT_RADIAL" ||
+          f.type === "GRADIENT_ANGULAR" ||
+          f.type === "GRADIENT_DIAMOND") &&
+        f.gradientStops
+      ) {
+        f.gradientStops.forEach((stop: any) => {
+          if (stop.color) {
+            const { r, g, b, a = 1 } = stop.color;
+            const hex = `#${[r, g, b]
+              .map((x) =>
+                Math.round(x * 255)
+                  .toString(16)
+                  .padStart(2, "0")
+              )
+              .join("")}`;
+
+            if (!results.colors.has(hex)) {
+              results.colors.set(hex, {
+                hex,
+                alpha: Math.round(a * 100),
+                usages: 0,
+              });
+            }
+
+            const color = results.colors.get(hex);
+            if (color) color.usages++;
+          }
+        });
+      }
+    });
   }
 
   // Extract typography data
@@ -592,7 +791,10 @@ export function extractComponentInstances(node: FigmaNode): ComponentInstance[] 
   if (node.children && Array.isArray(node.children)) {
     node.children.forEach((child) => {
       // Detect component instances by presence of mainComponent ID
-      const mainCompId = (child as any).mainComponent;
+      // mainComponent can be a string ID or an object with .id property
+      const mainComp = (child as any).mainComponent;
+      const mainCompId = typeof mainComp === "string" ? mainComp : mainComp?.id;
+
       if (mainCompId) {
         const overrides: PropertyOverride[] = [];
 
@@ -650,11 +852,13 @@ export function extractAssets(node: FigmaNode, pageName: string, assets: Asset[]
     assets.push(asset);
   }
 
-  // Heuristic for illustration/background: larger component or frame with multiple children
-  if ((node.type === "COMPONENT" || node.type === "FRAME") && bb && bb.width > 200 && (node.children?.length ?? 0) > 1) {
-    // Only if not already a screen (screens are handled separately)
+  // Heuristic for illustration/background: requires COMPONENT type OR explicit IMAGE fill
+  if (bb && bb.width > 200) {
+    const hasImageFill = (node.fills ?? []).some((f: any) => f.type === "IMAGE");
+    const isComponent = node.type === "COMPONENT" || node.type === "COMPONENT_SET";
     const isScreen = node.type === "FRAME" && /^\d+_(Light|Dark)_/.test(node.name);
-    if (!isScreen) {
+
+    if ((isComponent || hasImageFill) && !isScreen && (node.children?.length ?? 0) > 0) {
       const asset: Asset = {
         id: node.id,
         name: node.name,
@@ -740,7 +944,7 @@ export function hexToRgb(hex: string): string {
  * Extract file key from Figma URL or return as-is if already a key
  */
 export function extractFileKey(input: string): string {
-  const match = input.match(/figma\.com\/(?:design|file|board|make)\/([a-zA-Z0-9]+)/);
+  const match = input.match(/figma\.com\/(?:design|file|board|make|proto)\/([a-zA-Z0-9]+)/);
   return match ? match[1] : input.trim();
 }
 

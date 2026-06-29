@@ -14,6 +14,8 @@ import {
   collectAll,
   extractFileKey,
   formatFileSize,
+  fetchVariablesData,
+  fetchNamedStyles,
 } from "@/lib/figma";
 import { generateMarkdown, MARKDOWN_TEMPLATES } from "@/lib/markdown";
 
@@ -36,6 +38,8 @@ export default function FigmaToMarkdown(): JSX.Element {
   const [step, setStep] = useState<number>(0);
   const [progress, setProgress] = useState<string>("");
   const [result, setResult] = useState<ExtractionResult | null>(null);
+  const [treeResults, setTreeResults] = useState<CollectionResults | null>(null);
+  const [namedStyleCount, setNamedStyleCount] = useState<number>(0);
   const [markdown, setMarkdown] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [tab, setTab] = useState<TabType>("preview");
@@ -97,6 +101,23 @@ export default function FigmaToMarkdown(): JSX.Element {
         collectAll(pageNode, 0, treeResults);
       });
 
+      // Fetch Variables + Token Modes (single API call)
+      const variablesData = await fetchVariablesData(key, token);
+      if (variablesData) {
+        treeResults.variables = variablesData.variables;
+        treeResults.tokenModes = variablesData.tokenModes;
+        treeResults.diagnostics.variablesExtracted = variablesData.variables.size;
+      }
+
+      // Fetch named styles — stored separately, not merged into fileData.styles
+      // (fileData.styles keys are node IDs; named styles keys are style keys — incompatible namespaces)
+      const namedStyles = await fetchNamedStyles(key, token);
+      const fetchedNamedStyleCount = Object.keys(namedStyles).length;
+      setNamedStyleCount(fetchedNamedStyleCount);
+
+      // Store tree results for template switching
+      setTreeResults(treeResults);
+
       // Dedup frames (no slice cap — all screens are included)
       const seen = new Set<string>();
       const uniqueFrames = treeResults.frames
@@ -105,6 +126,20 @@ export default function FigmaToMarkdown(): JSX.Element {
           seen.add(f.id);
           return true;
         });
+
+      // Composite extraction confidence (0–100):
+      // Each signal contributes a weighted score based on what was successfully extracted.
+      {
+        const d = treeResults.diagnostics;
+        let score = 0;
+        if (d.screensDetected > 0)                   score += 35; // screens found
+        if (treeResults.colors.size > 0)             score += 20; // color tokens
+        if (treeResults.fonts.size > 0)              score += 15; // typography
+        if (treeResults.components.length > 0)       score += 15; // components
+        if (treeResults.interactions.length > 0)     score += 10; // prototype flows
+        if (d.variablesExtracted > 0 || fetchedNamedStyleCount > 0) score += 5; // design system tokens
+        d.extractionConfidence = score;
+      }
 
       setStep(2);
 
@@ -149,6 +184,7 @@ export default function FigmaToMarkdown(): JSX.Element {
         pages: treeResults.pages,
         diagnostics: treeResults.diagnostics,
         assets: treeResults.assets,
+        namedStyleCount: fetchedNamedStyleCount,
       });
 
       setResult({
@@ -708,7 +744,7 @@ export default function FigmaToMarkdown(): JSX.Element {
                         setStep(3);
                         // Trigger regeneration by simulating the extraction process
                         setTimeout(() => {
-                          if (result) {
+                          if (result && treeResults) {
                             const md = generateMarkdown({
                               fileData: result.fileData,
                               frames: result.frames,
@@ -720,6 +756,14 @@ export default function FigmaToMarkdown(): JSX.Element {
                               effects: result.effects,
                               fileKey: extractFileKey(fileKey),
                               template: key,
+                              flowMapLabels: treeResults.flowMapLabels,
+                              screenGroups: treeResults.screenGroups,
+                              variables: result.variables,
+                              tokenModes: result.tokenModes,
+                              pages: result.pages,
+                              diagnostics: result.diagnostics,
+                              assets: result.assets,
+                              namedStyleCount,
                             });
                             setMarkdown(md);
                             setPhase("done");
