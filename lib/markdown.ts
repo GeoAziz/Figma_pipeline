@@ -61,6 +61,7 @@ export const MARKDOWN_TEMPLATES: Record<TemplateType, MarkdownTemplate> = {
       "colors",
       "typography",
       "components",
+      "instances",
       "interactions",
       "layout",
       "effects",
@@ -68,8 +69,8 @@ export const MARKDOWN_TEMPLATES: Record<TemplateType, MarkdownTemplate> = {
       "flowmap",
       "screens",
       "diagnostics",
-      "instructions",
       "assets",
+      "instructions",
     ],
   },
   accessibility: {
@@ -141,6 +142,9 @@ export function generateMarkdown({
       case "components":
         md += buildComponentInventory(components);
         break;
+      case "instances":
+        md += buildComponentInstances(frames);
+        break;
       case "interactions":
         md += buildInteractions(interactions, frames);
         break;
@@ -172,7 +176,7 @@ export function generateMarkdown({
       case "diagnostics":
         md += buildDiagnostics(diagnostics ?? { visitedNodes: 0, pagesScanned: 0, screensDetected: 0, screenLikeFrames: 0, metadataFiltered: 0, componentInstanceLabelFiltered: 0, rasterizedScreens: 0, constraintsExtracted: 0, variablesExtracted: 0, assetsIdentified: 0, extractionConfidence: 0, skippedReasons: {} }, frames);
         md += buildPageTopology(pages);
-        md += buildAssetManifestSection(assets);
+        md += buildAssetManifestSection(assets, fileKey);
         break;
     }
   });
@@ -294,12 +298,12 @@ function buildComponentInventory(components: ExtractedComponent[]): string {
   if (components.length === 0) {
     return `## 🧩 Components
 
-_No components extracted._
+_No component definitions extracted._
 
 `;
   }
 
-  let md = `## 🧩 Components (${components.length} components)
+  let md = `## 🧩 Components (${components.length} main components)
 
 `;
 
@@ -336,6 +340,85 @@ ${comp.variants
   if (components.length > 20) {
     md += `\n_... and ${components.length - 20} more components_\n\n`;
   }
+
+  return md;
+}
+
+/** Build component instance usage inventory across all screens */
+function buildComponentInstances(frames: ExtractedFrame[]): string {
+  // Collect all component instances across all screens
+  const allInstances = new Map<
+    string,
+    {
+      mainId: string;
+      mainName: string;
+      instances: Array<{ instanceId: string; instanceName: string; mainComponentId: string; mainComponentName: string; overrides: any[] }>;
+    }
+  >();
+  const totalInstances: Array<{ instanceId: string; instanceName: string; mainComponentId: string; mainComponentName: string; overrides: any[] }> = [];
+
+  frames.forEach((frame) => {
+    if (frame.componentInstances && frame.componentInstances.length > 0) {
+      frame.componentInstances.forEach((inst) => {
+        totalInstances.push(inst);
+        const key = inst.mainComponentId;
+        if (!allInstances.has(key)) {
+          allInstances.set(key, {
+            mainId: inst.mainComponentId,
+            mainName: inst.mainComponentName,
+            instances: [],
+          });
+        }
+        allInstances.get(key)!.instances.push(inst);
+      });
+    }
+  });
+
+  if (totalInstances.length === 0) {
+    return `## 🔗 Component Instances
+
+_No component instances detected in screens._
+
+`;
+  }
+
+  let md = `## 🔗 Component Instances (${totalInstances.length} instances)
+
+${totalInstances.length} reusable component instances are used across the design. This indicates strong component reuse and design consistency.
+
+### Instance Summary by Component
+
+| Component | Instances | Usage |
+|-----------|-----------|-------|
+${[...allInstances.values()]
+  .sort((a, b) => b.instances.length - a.instances.length)
+  .slice(0, 25)
+  .map(
+    (item) =>
+      `| **${item.mainName}** | ${item.instances.length} | Reused across multiple screens |`
+  )
+  .join("\n")}
+${allInstances.size > 25 ? `| _... ${allInstances.size - 25} more components_ | | |\n` : ""}
+
+### Key Insights
+
+- **Total component instances:** ${totalInstances.length}
+- **Unique components used:** ${allInstances.size}
+- **Avg reuse per component:** ${(totalInstances.length / allInstances.size).toFixed(1)}×
+
+### Recommended Component States
+
+When building components, ensure each has these state variants:
+
+- **Default** — Normal, interactive state
+- **Hover** — Interactive feedback on mouse over
+- **Active** — Currently selected/pressed
+- **Disabled** — Non-interactive state
+- **Loading** — Processing/pending state
+- **Error** — Validation failure or error state
+- **Focus** — Keyboard/accessibility focus (important for WCAG compliance)
+
+`;
 
   return md;
 }
@@ -682,24 +765,43 @@ ${stubCount > 0 ? `${stubCount} screen(s) are rasterized PNG stubs. For each:\n-
 }
 
 function buildAssetChecklist(frames: ExtractedFrame[], fileKey: string): string {
-  return `## 📁 Asset Export Checklist
+  let md = `## 📁 Asset Export Checklist
 
 Use the Figma REST API to export assets before building:
 
+### Screen Thumbnails (PNG @2x)
 \`\`\`bash
-# Export all screen thumbnails (PNG @2x)
+# Export all screen thumbnails
 GET https://api.figma.com/v1/images/${fileKey}?ids=${frames
-    .slice(0, 5)
+    .slice(0, 10)
     .map((f) => f.id)
     .join(",")}&format=png&scale=2
 \`\`\`
 
-For icons and SVG assets:
+### Vector Icons (SVG)
+Extract icons in SVG format for crisp scaling and small file sizes:
+
 \`\`\`bash
-GET https://api.figma.com/v1/images/${fileKey}?ids={ICON_NODE_IDS}&format=svg
+GET https://api.figma.com/v1/images/${fileKey}?ids={ICON_NODE_IDS}&format=svg&scale=2
+\`\`\`
+
+### Raster Images (PNG)
+For photographs and complex illustrations:
+
+\`\`\`bash
+GET https://api.figma.com/v1/images/${fileKey}?ids={IMAGE_NODE_IDS}&format=png&scale=2
+\`\`\`
+
+### Using cURL to Download
+\`\`\`bash
+curl -X GET "https://api.figma.com/v1/images/${fileKey}?ids=NODE_ID&format=svg" \\
+  -H "X-Figma-Token: YOUR_TOKEN" \\
+  -o asset.svg
 \`\`\`
 
 `;
+
+  return md;
 }
 
 // ============================================================================
@@ -834,7 +936,7 @@ function buildPageTopology(pages: PageInfo[]): string {
   return md;
 }
 
-function buildAssetManifestSection(assets: Asset[]): string {
+function buildAssetManifestSection(assets: Asset[], fileKey?: string): string {
   if (assets.length === 0) {
     return "## 🎭 Asset Manifest\n\n_No assets extracted._\n\n";
   }
@@ -852,16 +954,39 @@ function buildAssetManifestSection(assets: Asset[]): string {
   md += "### Assets by Type\n\n";
   byType.forEach((assetList, type) => {
     md += `#### ${type} (${assetList.length})\n\n`;
-    md += "| Asset | Dimensions | Colors | Formats |\n";
-    md += "|-------|------------|--------|----------|\n";
-    assetList.slice(0, 10).forEach((a) => {
-      md += `| ${a.name} | ${a.dimensions.width}×${a.dimensions.height}px | ${a.fillColors?.length ?? 0} | ${a.exportFormats.join(", ")} |\n`;
+    md += "| Asset | Dimensions | Aspect Ratio | Colors | Formats | Node ID |\n";
+    md += "|-------|------------|--------------|--------|---------|----------|\n";
+    assetList.slice(0, 15).forEach((a) => {
+      const aspect = (a.dimensions.width / a.dimensions.height).toFixed(2);
+      const nodeLink = fileKey ? `[\`${a.nodeId.slice(-8)}\`](https://www.figma.com/design/${fileKey}?node-id=${a.nodeId.replace(":", "-")})` : `\`${a.nodeId}\``;
+      md += `| ${a.name} | ${a.dimensions.width}×${a.dimensions.height} | ${aspect} | ${a.fillColors?.length ?? 0} | ${a.exportFormats.join(", ")} | ${nodeLink} |\n`;
     });
-    if (assetList.length > 10) {
-      md += `| ... | ... | ... | ... |\n`;
+    if (assetList.length > 15) {
+      md += `| _... ${assetList.length - 15} more ${type.toLowerCase()}(s)_ | | | | | |\n`;
     }
     md += "\n";
   });
+
+  // Export instructions
+  md += "### Asset Export Instructions\n\n";
+  md += "**Icon Library (SVG):** Small, scalable icons for buttons, navigation, and UI elements.\n\n";
+  md += "**Illustrations (PNG/SVG):** Larger detailed graphics, patterns, and decorative elements.\n\n";
+  md += "**Images (PNG/JPEG):** Raster photographs and complex imagery (property photos, hero images, etc.).\n\n";
+
+  // Recommended exports
+  const iconCount = byType.get("ICON")?.length ?? 0;
+  const illustCount = byType.get("ILLUSTRATION")?.length ?? 0;
+  const imageCount = byType.get("IMAGE")?.length ?? 0;
+
+  if (iconCount > 0) {
+    md += `**${iconCount} icons** should be exported as **SVG** for crisp rendering at any scale.\n\n`;
+  }
+  if (illustCount > 0) {
+    md += `**${illustCount} illustrations** should be exported as **PNG @2x** or **SVG** depending on complexity.\n\n`;
+  }
+  if (imageCount > 0) {
+    md += `**${imageCount} images** should be exported as **PNG** or **JPEG** optimized for web (80-90% quality).\n\n`;
+  }
 
   return md;
 }

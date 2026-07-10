@@ -783,61 +783,89 @@ export function buildNodePath(
 }
 
 /**
- * Extract component instances with overrides
+ * Extract component instances with overrides (including nested)
  */
 export function extractComponentInstances(node: FigmaNode): ComponentInstance[] {
   const instances: ComponentInstance[] = [];
 
-  if (node.children && Array.isArray(node.children)) {
-    node.children.forEach((child) => {
-      // Detect component instances by presence of mainComponent ID
-      // mainComponent can be a string ID or an object with .id property
-      const mainComp = (child as any).mainComponent;
-      const mainCompId = typeof mainComp === "string" ? mainComp : mainComp?.id;
+  function walkTree(n: FigmaNode): void {
+    // Detect component instances by presence of mainComponent ID
+    const mainComp = (n as any).mainComponent;
+    const mainCompId = typeof mainComp === "string" ? mainComp : mainComp?.id;
 
-      if (mainCompId) {
-        const overrides: PropertyOverride[] = [];
+    if (mainCompId) {
+      const overrides: PropertyOverride[] = [];
 
-        // Extract property overrides if available
-        const componentProps = (child as any).componentProperties;
-        if (componentProps) {
-          Object.entries(componentProps).forEach(([propName, propValue]: [string, any]) => {
-            overrides.push({
-              nodeName: child.name,
-              property: propName,
-              value: propValue?.value ?? propValue,
-              mainComponentProperty: propName,
-            });
+      // Extract property overrides if available
+      const componentProps = (n as any).componentProperties;
+      if (componentProps) {
+        Object.entries(componentProps).forEach(([propName, propValue]: [string, any]) => {
+          overrides.push({
+            nodeName: n.name,
+            property: propName,
+            value: propValue?.value ?? propValue,
+            mainComponentProperty: propName,
           });
-        }
-
-        instances.push({
-          instanceId: child.id,
-          instanceName: child.name,
-          mainComponentId: mainCompId,
-          mainComponentName: child.name, // Placeholder; would need API lookup
-          overrides,
         });
       }
 
-      // Recursively extract nested instances
-      instances.push(...extractComponentInstances(child));
-    });
+      instances.push({
+        instanceId: n.id,
+        instanceName: n.name,
+        mainComponentId: mainCompId,
+        mainComponentName: n.name, // Placeholder; would need API lookup
+        overrides,
+      });
+    }
+
+    // Recursively walk all children
+    if (n.children && Array.isArray(n.children)) {
+      n.children.forEach(walkTree);
+    }
   }
 
+  walkTree(node);
   return instances;
 }
 
 /**
- * Identify and extract asset nodes (icons, illustrations, backgrounds)
+ * Identify and extract asset nodes (icons, illustrations, backgrounds, images)
+ * Enhanced to catch vectors, images, and components used as assets
  */
 export function extractAssets(node: FigmaNode, pageName: string, assets: Asset[]): void {
   if (!node) return;
 
   const bb = node.absoluteBoundingBox;
+  const seenAssetIds = new Set(assets.map((a) => a.id));
 
-  // Heuristic for icon: small square/rectangular shape (< 100x100px), often standalone
-  if (node.type === "COMPONENT" && bb && bb.width <= 100 && bb.height <= 100 && bb.width > 0) {
+  // VECTOR icons: any VECTOR type node
+  if (node.type === "VECTOR" && bb && bb.width > 0 && bb.height > 0) {
+    if (!seenAssetIds.has(node.id)) {
+      const asset: Asset = {
+        id: node.id,
+        name: node.name,
+        type: "ICON",
+        nodeId: node.id,
+        pageName,
+        dimensions: { width: bb.width, height: bb.height },
+        fillColors: extractAssetColors(node),
+        usageCount: 1,
+        exportFormats: ["SVG", "PNG"],
+      };
+      assets.push(asset);
+      seenAssetIds.add(node.id);
+    }
+  }
+
+  // COMPONENT icons: small components (< 100x100px)
+  if (
+    node.type === "COMPONENT" &&
+    bb &&
+    bb.width <= 100 &&
+    bb.height <= 100 &&
+    bb.width > 0 &&
+    !seenAssetIds.has(node.id)
+  ) {
     const asset: Asset = {
       id: node.id,
       name: node.name,
@@ -850,19 +878,43 @@ export function extractAssets(node: FigmaNode, pageName: string, assets: Asset[]
       exportFormats: ["SVG", "PNG"],
     };
     assets.push(asset);
+    seenAssetIds.add(node.id);
   }
 
-  // Heuristic for illustration/background: requires COMPONENT type OR explicit IMAGE fill
-  if (bb && bb.width > 200) {
+  // IMAGE fills (raster images)
+  if (node.type === "RECTANGLE" && bb && bb.width > 0 && bb.height > 0) {
     const hasImageFill = (node.fills ?? []).some((f: any) => f.type === "IMAGE");
-    const isComponent = node.type === "COMPONENT" || node.type === "COMPONENT_SET";
-    const isScreen = node.type === "FRAME" && /^\d+_(Light|Dark)_/.test(node.name);
-
-    if ((isComponent || hasImageFill) && !isScreen && (node.children?.length ?? 0) > 0) {
+    if (hasImageFill && !seenAssetIds.has(node.id)) {
       const asset: Asset = {
         id: node.id,
         name: node.name,
-        type: (node.children?.length ?? 0) > 5 ? "ILLUSTRATION" : "BACKGROUND",
+        type: "IMAGE",
+        nodeId: node.id,
+        pageName,
+        dimensions: { width: bb.width, height: bb.height },
+        fillColors: extractAssetColors(node),
+        usageCount: 1,
+        exportFormats: ["PNG", "JPEG"],
+      };
+      assets.push(asset);
+      seenAssetIds.add(node.id);
+    }
+  }
+
+  // COMPONENT illustrations/patterns: larger components (> 100px) with content
+  if (
+    (node.type === "COMPONENT" || node.type === "COMPONENT_SET") &&
+    bb &&
+    bb.width > 100 &&
+    (node.children?.length ?? 0) > 0 &&
+    !seenAssetIds.has(node.id)
+  ) {
+    // Don't extract screens as assets
+    if (!/^\d+_(Light|Dark)_/.test(node.name)) {
+      const asset: Asset = {
+        id: node.id,
+        name: node.name,
+        type: (node.children?.length ?? 0) > 10 ? "ILLUSTRATION" : "PATTERN",
         nodeId: node.id,
         pageName,
         dimensions: { width: bb.width, height: bb.height },
@@ -871,6 +923,7 @@ export function extractAssets(node: FigmaNode, pageName: string, assets: Asset[]
         exportFormats: ["PNG", "SVG"],
       };
       assets.push(asset);
+      seenAssetIds.add(node.id);
     }
   }
 

@@ -245,7 +245,7 @@ export interface Asset {
   dimensions: { width: number; height: number };
   fillColors?: string[];
   usageCount: number;
-  exportFormats: ("PNG" | "SVG" | "PDF")[];
+  exportFormats: ("PNG" | "SVG" | "PDF" | "JPEG")[];
 }
 
 export interface AssetManifest {
@@ -421,7 +421,7 @@ export interface MarkdownTemplate {
   type: TemplateType;
   name: string;
   description: string;
-  sections: ("overview" | "colors" | "typography" | "components" | "interactions" | "layout" | "effects" | "accessibility" | "screens" | "instructions" | "assets" | "flowmap" | "tokens" | "diagnostics")[];
+  sections: ("overview" | "colors" | "typography" | "components" | "instances" | "interactions" | "layout" | "effects" | "accessibility" | "screens" | "instructions" | "assets" | "flowmap" | "tokens" | "diagnostics")[];
 }
 
 export type UIPhase = "idle" | "loading" | "done" | "error";
